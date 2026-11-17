@@ -151,3 +151,77 @@ jobs:
             gh release create "$tag" dist/* -R "$GITHUB_REPOSITORY" \
               --title "$TITLE $VERSION" --notes-file notes.md --latest="$LATEST"
           fi
+
+  # The update feed: the same paths releases.herdr.dev serves, on the
+  # `updates` branch, so HERDR_RELEASES_URL can point at
+  # https://raw.githubusercontent.com/<repo>/updates. Rebuilt from the
+  # releases here each run: each manifest is upstream's, with its targets cut
+  # to the builds mirrored here and their URLs pointed at these releases. The
+  # sha256 stays upstream's, so a mirrored file that differs fails to install.
+  feed:
+    needs: mirror
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Build the feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p feed && cd feed
+          git init -q -b updates
+          if git fetch -q --depth 1 "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" updates 2>/dev/null; then
+            git checkout -q FETCH_HEAD -B updates
+          fi
+          gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' > ../tags
+          python3 - "$GITHUB_REPOSITORY" "$RELEASES_URL" "$TARGET" "$UA" < ../tags <<'PY'
+          import json, pathlib, re, sys, urllib.request
+          repo, upstream, target, ua = sys.argv[1:5]
+          def get(url):
+              req = urllib.request.Request(url, headers={"User-Agent": ua})
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  return r.read()
+          def key(v):
+              return tuple(int(x) for x in re.findall(r"\d+", v))
+          products = {
+              "app": ("v", f"herdr-app-{target}.tar.gz"),
+              "core": ("core-v", f"herdr-core-{target}.zip"),
+          }
+          tags = sys.stdin.read().split()
+          for product, (prefix, asset) in products.items():
+              versions = [t[len(prefix):] for t in tags if re.fullmatch(re.escape(prefix) + r"\d+(\.\d+)*", t)]
+              latest = None
+              for v in sorted(versions, key=key):
+                  m = json.loads(get(f"{upstream}/{product}/{v}/manifest.json"))
+                  t = m["targets"].get(target)
+                  if not t:
+                      continue
+                  m["targets"] = {target: {"url": f"https://github.com/{repo}/releases/download/{prefix}{v}/{asset}", "sha256": t["sha256"]}}
+                  d = pathlib.Path(product, v)
+                  d.mkdir(parents=True, exist_ok=True)
+                  (d / "manifest.json").write_text(json.dumps(m, indent=2) + "\n")
+                  if product == "app" and not (d / "changelog.md").exists():
+                      try:
+                          (d / "changelog.md").write_bytes(get(f"{upstream}/app/{v}/changelog.md"))
+                      except Exception as e:
+                          print(f"no changelog for app {v}: {e}")
+                  latest = m
+              if latest:
+                  pathlib.Path(product, "latest.json").write_text(json.dumps(latest, indent=2) + "\n")
+                  print(f"{product}/latest.json -> {latest['version']}")
+          PY
+          # The installers, from each project's source, so they read this feed too.
+          curl -fsSL https://raw.githubusercontent.com/herdrdev/herdr-app/master/distribution/install.ps1 -o app/install.ps1
+          curl -fsSL https://raw.githubusercontent.com/herdrdev/herdr-app/master/distribution/install.sh -o app/install.sh
+          curl -fsSL https://raw.githubusercontent.com/herdrdev/herdr-core/master/distribution/install.ps1 -o core/install.ps1
+          curl -fsSL https://raw.githubusercontent.com/herdrdev/herdr-core/master/distribution/install.sh -o core/install.sh
+          git add -A
+          if git diff --cached --quiet; then
+            echo "feed unchanged"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "chore(feed): update the release feed"
+          git push -q "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" updates
+          git show --stat --oneline HEAD | head -30
