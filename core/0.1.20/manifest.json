@@ -1,0 +1,11 @@
+{
+  "version": "0.1.20",
+  "generation": 1,
+  "notes": "`hc server restart --fresh` takes your current shell's environment for new terminals without ending running programs. Run it from a terminal outside Herdr if an agent started Herdr with unwanted settings.",
+  "targets": {
+    "windows-x86_64": {
+      "url": "https://github.com/ck-ling/herdr-app-mirror/releases/download/core-v0.1.20/herdr-core-windows-x86_64.zip",
+      "sha256": "13b29c61a9932ea028c36ccc419bcf3ec679f2fd6c528f93c8fbd1d7331ee20b"
+    }
+  }
+}
