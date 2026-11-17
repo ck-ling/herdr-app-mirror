@@ -1,6 +1,7 @@
-# Copies each new Herdr app release from releases.herdr.dev into a GitHub
-# release here. Only Windows x64 for now. The zip keeps the herdr-app folder
-# whole: the app updates itself only when herdr-app.svg sits beside the exe.
+# Copies each new Herdr app and herdr-core release from releases.herdr.dev
+# into GitHub releases here (app: v<version>, core: core-v<version>). Only
+# Windows x64 for now. The app's zip keeps the herdr-app folder whole: the
+# app updates itself only when herdr-app.svg sits beside the exe.
 name: mirror
 
 on:
@@ -8,8 +9,11 @@ on:
     - cron: "17 */6 * * *"
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to mirror (empty: the latest)"
+      app_version:
+        description: "App version to mirror (empty: the latest)"
+        required: false
+      core_version:
+        description: "Core version to mirror (empty: the latest)"
         required: false
 
 permissions:
@@ -22,24 +26,32 @@ concurrency:
 env:
   RELEASES_URL: https://releases.herdr.dev
   TARGET: windows-x86_64
-  # releases.herdr.dev refuses some requests without a browser-like agent.
-  UA: "Mozilla/5.0 (herdr-app-mirror)"
+  UA: "herdr-app-mirror (+https://github.com/${{ github.repository }})"
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { product: app, name: herdr-app, tag: v, latest: true, title: "Herdr" }
+          - { product: core, name: herdr-core, tag: core-v, latest: false, title: "herdr-core" }
+    env:
+      PRODUCT: ${{ matrix.product }}
+      NAME: ${{ matrix.name }}
+      TAG_PREFIX: ${{ matrix.tag }}
+      WANT: ${{ matrix.product == 'app' && inputs.app_version || inputs.core_version }}
     steps:
       - name: Read the manifest
         id: manifest
-        env:
-          WANT: ${{ inputs.version }}
         run: |
           set -euo pipefail
           if [ -n "${WANT:-}" ]; then
-            path="app/$WANT/manifest.json"
+            path="$PRODUCT/$WANT/manifest.json"
           else
-            path="app/latest.json"
+            path="$PRODUCT/latest.json"
           fi
           curl -fsSL -A "$UA" "$RELEASES_URL/$path" -o manifest.json
           cat manifest.json
@@ -50,6 +62,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "file=$(basename "$url")" >> "$GITHUB_OUTPUT"
 
       - name: Skip a version already mirrored
         id: have
@@ -57,9 +70,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.manifest.outputs.version }}
         run: |
-          name="herdr-app-$TARGET.zip"
-          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "$name"; then
-            echo "v$VERSION already has $name"
+          zip="$NAME-$TARGET.zip"
+          if gh release view "$TAG_PREFIX$VERSION" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "$zip"; then
+            echo "$TAG_PREFIX$VERSION already has $zip"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -68,20 +81,38 @@ jobs:
         env:
           URL: ${{ steps.manifest.outputs.url }}
           SHA: ${{ steps.manifest.outputs.sha }}
+          FILE: ${{ steps.manifest.outputs.file }}
           VERSION: ${{ steps.manifest.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist work
-          tarball="dist/herdr-app-$TARGET.tar.gz"
-          curl -fsSL -A "$UA" --retry 3 "$URL" -o "$tarball"
-          echo "$SHA  $tarball" | sha256sum -c -
-          tar -xzf "$tarball" -C work
-          [ -f work/herdr-app/herdr-app.exe ] && [ -f work/herdr-app/herdr-app.svg ] || { echo "unexpected tarball layout"; ls -R work; exit 1; }
-          (cd work && zip -qr "../dist/herdr-app-$TARGET.zip" herdr-app)
-          cp work/herdr-app/LICENSE work/herdr-app/THIRD-PARTY-NOTICES dist/
-          (cd dist && sha256sum herdr-app-* > SHA256SUMS)
+          curl -fsSL -A "$UA" --retry 3 "$URL" -o "dist/$FILE"
+          echo "$SHA  dist/$FILE" | sha256sum -c -
+          zip="dist/$NAME-$TARGET.zip"
+          case "$FILE" in
+            *.tar.gz)
+              # The app: a herdr-app folder, repacked as a zip for Windows.
+              tar -xzf "dist/$FILE" -C work
+              [ -f work/herdr-app/herdr-app.exe ] && [ -f work/herdr-app/herdr-app.svg ] || { echo "unexpected layout"; ls -R work; exit 1; }
+              (cd work && zip -qr "../$zip" herdr-app)
+              cp work/herdr-app/LICENSE work/herdr-app/THIRD-PARTY-NOTICES dist/
+              ;;
+            *.zip)
+              # The core already ships as a zip: publish it as it is.
+              [ "dist/$FILE" = "$zip" ] || mv "dist/$FILE" "$zip"
+              unzip -l "$zip"
+              unzip -q "$zip" -d work
+              find work -maxdepth 2 \( -name 'LICENSE*' -o -name 'THIRD-PARTY-NOTICES*' \) -type f -exec cp {} dist/ \;
+              ;;
+            *) echo "unknown file type: $FILE"; exit 1 ;;
+          esac
+          (cd dist && sha256sum "$NAME"-* > SHA256SUMS)
           cat dist/SHA256SUMS
-          curl -fsSL -A "$UA" "$RELEASES_URL/app/$VERSION/changelog.md" -o changelog.md || echo "no changelog" > changelog.md
+          if [ "$PRODUCT" = app ] && curl -fsSL -A "$UA" "$RELEASES_URL/app/$VERSION/changelog.md" -o changelog.md; then
+            :
+          else
+            jq -r '.notes // "No notes."' manifest.json > changelog.md
+          fi
 
       - name: Publish the release
         if: steps.have.outputs.skip != 'true'
@@ -89,16 +120,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.manifest.outputs.version }}
           SHA: ${{ steps.manifest.outputs.sha }}
+          FILE: ${{ steps.manifest.outputs.file }}
+          TITLE: ${{ matrix.title }}
+          LATEST: ${{ matrix.latest }}
         run: |
           set -euo pipefail
+          tag="$TAG_PREFIX$VERSION"
           {
-            echo "Mirror of Herdr $VERSION from $RELEASES_URL. Not an official release."
+            echo "Mirror of $TITLE $VERSION from $RELEASES_URL. Not an official release."
             echo
-            echo "**Windows x64:** download \`herdr-app-$TARGET.zip\`, extract it, and run \`herdr-app\\herdr-app.exe\`."
-            echo "Keep the files together: the app updates itself only from the whole folder."
-            echo "The app also needs [herdr-core](https://github.com/herdrdev/herdr-core); it offers to install it on first start."
+            if [ "$PRODUCT" = app ]; then
+              echo "**Windows x64:** download \`$NAME-$TARGET.zip\`, extract it, and run \`herdr-app\\herdr-app.exe\`."
+              echo "Keep the files together: the app updates itself only from the whole folder."
+              echo "The app also needs herdr-core: see the latest \`core-v*\` release here."
+            else
+              echo "**Windows x64:** download \`$NAME-$TARGET.zip\` and extract it. The Herdr app uses this core."
+            fi
             echo
-            echo "Upstream sha256 of \`herdr-app-$TARGET.tar.gz\`: \`$SHA\`"
+            echo "Upstream sha256 of \`$FILE\`: \`$SHA\`"
             echo
             echo "<details><summary>Changelog</summary>"
             echo
@@ -106,9 +145,9 @@ jobs:
             echo
             echo "</details>"
           } > notes.md
-          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "v$VERSION" dist/* --clobber -R "$GITHUB_REPOSITORY"
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber -R "$GITHUB_REPOSITORY"
           else
-            gh release create "v$VERSION" dist/* -R "$GITHUB_REPOSITORY" \
-              --title "Herdr $VERSION" --notes-file notes.md --latest
+            gh release create "$tag" dist/* -R "$GITHUB_REPOSITORY" \
+              --title "$TITLE $VERSION" --notes-file notes.md --latest="$LATEST"
           fi
