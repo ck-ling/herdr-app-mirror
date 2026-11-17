@@ -3,7 +3,7 @@
 Unofficial mirror of the [Herdr desktop app](https://github.com/herdrdev/herdr-app) and [herdr-core](https://github.com/herdrdev/herdr-core) releases.
 The official builds live on `releases.herdr.dev`. This repo copies them into GitHub Releases, and serves an update feed for them.
 
-The `mirror` workflow checks for new versions every 6 hours.
+The `mirror` workflow checks for new versions every hour, the same interval at which the app checks this feed.
 It checks each download against the upstream sha256 before it publishes.
 Run it by hand from the Actions tab to mirror one version now.
 
