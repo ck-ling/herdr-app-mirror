@@ -175,9 +175,9 @@ jobs:
             git checkout -q FETCH_HEAD -B updates
           fi
           gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' > ../tags
-          python3 - "$GITHUB_REPOSITORY" "$RELEASES_URL" "$TARGET" "$UA" < ../tags <<'PY'
+          python3 - "$GITHUB_REPOSITORY" "$RELEASES_URL" "$TARGET" "$UA" ../tags <<'PY'
           import json, pathlib, re, sys, urllib.request
-          repo, upstream, target, ua = sys.argv[1:5]
+          repo, upstream, target, ua, tag_file = sys.argv[1:6]
           def get(url):
               req = urllib.request.Request(url, headers={"User-Agent": ua})
               with urllib.request.urlopen(req, timeout=60) as r:
@@ -188,7 +188,7 @@ jobs:
               "app": ("v", f"herdr-app-{target}.tar.gz"),
               "core": ("core-v", f"herdr-core-{target}.zip"),
           }
-          tags = sys.stdin.read().split()
+          tags = pathlib.Path(tag_file).read_text().split()
           for product, (prefix, asset) in products.items():
               versions = [t[len(prefix):] for t in tags if re.fullmatch(re.escape(prefix) + r"\d+(\.\d+)*", t)]
               latest = None
