@@ -1,0 +1,114 @@
+# Copies each new Herdr app release from releases.herdr.dev into a GitHub
+# release here. Only Windows x64 for now. The zip keeps the herdr-app folder
+# whole: the app updates itself only when herdr-app.svg sits beside the exe.
+name: mirror
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to mirror (empty: the latest)"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+env:
+  RELEASES_URL: https://releases.herdr.dev
+  TARGET: windows-x86_64
+  # releases.herdr.dev refuses some requests without a browser-like agent.
+  UA: "Mozilla/5.0 (herdr-app-mirror)"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Read the manifest
+        id: manifest
+        env:
+          WANT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${WANT:-}" ]; then
+            path="app/$WANT/manifest.json"
+          else
+            path="app/latest.json"
+          fi
+          curl -fsSL -A "$UA" "$RELEASES_URL/$path" -o manifest.json
+          cat manifest.json
+          version=$(jq -r .version manifest.json)
+          url=$(jq -r --arg t "$TARGET" '.targets[$t].url // empty' manifest.json)
+          sha=$(jq -r --arg t "$TARGET" '.targets[$t].sha256 // empty' manifest.json)
+          [ -n "$url" ] && [ -n "$sha" ] || { echo "no $TARGET build in $path"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Skip a version already mirrored
+        id: have
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+        run: |
+          name="herdr-app-$TARGET.zip"
+          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "$name"; then
+            echo "v$VERSION already has $name"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download and check
+        if: steps.have.outputs.skip != 'true'
+        env:
+          URL: ${{ steps.manifest.outputs.url }}
+          SHA: ${{ steps.manifest.outputs.sha }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist work
+          tarball="dist/herdr-app-$TARGET.tar.gz"
+          curl -fsSL -A "$UA" --retry 3 "$URL" -o "$tarball"
+          echo "$SHA  $tarball" | sha256sum -c -
+          tar -xzf "$tarball" -C work
+          [ -f work/herdr-app/herdr-app.exe ] && [ -f work/herdr-app/herdr-app.svg ] || { echo "unexpected tarball layout"; ls -R work; exit 1; }
+          (cd work && zip -qr "../dist/herdr-app-$TARGET.zip" herdr-app)
+          cp work/herdr-app/LICENSE work/herdr-app/THIRD-PARTY-NOTICES dist/
+          (cd dist && sha256sum herdr-app-* > SHA256SUMS)
+          cat dist/SHA256SUMS
+          curl -fsSL -A "$UA" "$RELEASES_URL/app/$VERSION/changelog.md" -o changelog.md || echo "no changelog" > changelog.md
+
+      - name: Publish the release
+        if: steps.have.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+          SHA: ${{ steps.manifest.outputs.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Mirror of Herdr $VERSION from $RELEASES_URL. Not an official release."
+            echo
+            echo "**Windows x64:** download \`herdr-app-$TARGET.zip\`, extract it, and run \`herdr-app\\herdr-app.exe\`."
+            echo "Keep the files together: the app updates itself only from the whole folder."
+            echo "The app also needs [herdr-core](https://github.com/herdrdev/herdr-core); it offers to install it on first start."
+            echo
+            echo "Upstream sha256 of \`herdr-app-$TARGET.tar.gz\`: \`$SHA\`"
+            echo
+            echo "<details><summary>Changelog</summary>"
+            echo
+            cat changelog.md
+            echo
+            echo "</details>"
+          } > notes.md
+          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" dist/* --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "v$VERSION" dist/* -R "$GITHUB_REPOSITORY" \
+              --title "Herdr $VERSION" --notes-file notes.md --latest
+          fi
