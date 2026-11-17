@@ -126,6 +126,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="$TAG_PREFIX$VERSION"
+          # An older version mirrored by hand must not take the latest mark.
+          [ -z "${WANT:-}" ] || LATEST=false
           {
             echo "Mirror of $TITLE $VERSION from $RELEASES_URL. Not an official release."
             echo
