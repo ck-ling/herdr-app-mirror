@@ -1,0 +1,11 @@
+{
+  "version": "0.1.22",
+  "generation": 1,
+  "notes": "**A subscription can name the documents it wants, instead of receiving every one.** `hc events --doc <name>` (repeatable; a name ending in `*` is a prefix) delivers only those document changes, so a program that watches a single document no longer has every document change from every terminal delivered to it, and no longer has to filter them out itself. An unfiltered subscriber still hears every document, and existing terminal filters keep their behavior; a subscriber that selects a terminal and also names documents hears both. (#273, thanks @felixzsh)",
+  "targets": {
+    "windows-x86_64": {
+      "url": "https://github.com/ck-ling/herdr-app-mirror/releases/download/core-v0.1.22/herdr-core-windows-x86_64.zip",
+      "sha256": "37cae9d6c522e205efcdb55a42d354285f41b8cbb4c6e60fb505b73b151966c9"
+    }
+  }
+}
