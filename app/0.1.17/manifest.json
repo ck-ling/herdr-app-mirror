@@ -1,0 +1,11 @@
+{
+  "version": "0.1.17",
+  "core_min": "0.1.11",
+  "notes": "Herdr 0.1.17",
+  "targets": {
+    "windows-x86_64": {
+      "url": "https://github.com/ck-ling/herdr-app-mirror/releases/download/v0.1.17/herdr-app-windows-x86_64.tar.gz",
+      "sha256": "9a2bcfb8cf7210668965ebb6eaf68465fa8378841f578a3b116fd06550bd31bb"
+    }
+  }
+}
