@@ -1,0 +1,109 @@
+# Copies MSYS2's zsh package for x86_64 into a GitHub release here
+# (zsh-v<version>, for example zsh-v5.9.2-1), so a network that blocks
+# repo.msys2.org can still get zsh for Git for Windows. The package and its
+# .sig are published as they came, after gpg checks the .sig against MSYS2's
+# master keys from github.com/msys2/MSYS2-keyring. The release never takes
+# the latest mark, which stays with the Herdr app.
+name: zsh
+
+on:
+  schedule:
+    - cron: "40 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version to mirror, such as 5.9.2-1 (empty: the newest)"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zsh
+  cancel-in-progress: false
+
+env:
+  REPO_URL: https://repo.msys2.org/msys/x86_64
+  UA: "herdr-app-mirror (+https://github.com/${{ github.repository }})"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Pick the version
+        id: pick
+        env:
+          WANT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${WANT:-}" ]; then
+            version="$WANT"
+          else
+            # The index lists every build kept; sort -V puts the newest last.
+            version=$(curl -fsSL -A "$UA" "$REPO_URL/" \
+              | grep -oE 'zsh-[0-9][0-9.]*-[0-9]+-x86_64\.pkg\.tar\.zst"' \
+              | sed -E 's/^zsh-(.*)-x86_64\.pkg\.tar\.zst"$/\1/' | sort -uV | tail -n 1)
+          fi
+          [ -n "$version" ] || { echo "no zsh package in $REPO_URL"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "file=zsh-$version-x86_64.pkg.tar.zst" >> "$GITHUB_OUTPUT"
+
+      - name: Skip a version already mirrored
+        id: have
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pick.outputs.version }}
+          FILE: ${{ steps.pick.outputs.file }}
+        run: |
+          if gh release view "zsh-v$VERSION" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "$FILE"; then
+            echo "zsh-v$VERSION already has $FILE"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download and check
+        if: steps.have.outputs.skip != 'true'
+        env:
+          FILE: ${{ steps.pick.outputs.file }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist keys
+          curl -fsSL -A "$UA" --retry 3 "$REPO_URL/$FILE" -o "dist/$FILE"
+          curl -fsSL -A "$UA" --retry 3 "$REPO_URL/$FILE.sig" -o "dist/$FILE.sig"
+          # MSYS2 signs packages with its master keys. Only master/ is
+          # imported: revoked keys sit in master-revoked/, so a signature by
+          # one of them fails here.
+          git clone -q --depth 1 https://github.com/msys2/MSYS2-keyring.git keyring
+          export GNUPGHOME="$PWD/keys"
+          chmod 700 keys
+          for key in keyring/master/*.asc; do gpg --batch -q --import "$key"; done
+          gpg --batch --verify "dist/$FILE.sig" "dist/$FILE"
+          # The package must hold zsh itself, for Git for Windows' usr/bin.
+          tar --zstd -tf "dist/$FILE" | grep -qx 'usr/bin/zsh.exe' || { echo "no usr/bin/zsh.exe in $FILE"; exit 1; }
+          tar --zstd -xOf "dist/$FILE" .PKGINFO | grep -E '^(pkgver|depend) ='
+          (cd dist && sha256sum "$FILE" > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Publish the release
+        if: steps.have.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pick.outputs.version }}
+          FILE: ${{ steps.pick.outputs.file }}
+        run: |
+          set -euo pipefail
+          tag="zsh-v$VERSION"
+          {
+            echo "Mirror of MSYS2's zsh $VERSION package from $REPO_URL. Not an official release."
+            echo
+            echo "For Git for Windows: unpack \`$FILE\` into the Git folder, so \`usr/bin/zsh.exe\` lands beside Git's \`bash.exe\`."
+            echo "It needs libiconv, libpcre2_8 and ncurses, which Git for Windows already ships."
+            echo
+            echo "\`$FILE.sig\` is MSYS2's own signature; it was checked against MSYS2's master keys before publishing."
+          } > notes.md
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" dist/* -R "$GITHUB_REPOSITORY" \
+              --title "zsh $VERSION (MSYS2)" --notes-file notes.md --latest=false
+          fi
