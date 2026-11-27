@@ -2,7 +2,7 @@
 # (zsh-v<version>, for example zsh-v5.9.2-1), so a network that blocks
 # repo.msys2.org can still get zsh for Git for Windows. The package and its
 # .sig are published as they came, after gpg checks the .sig against MSYS2's
-# master keys from github.com/msys2/MSYS2-keyring. The release never takes
+# packager and master keys from github.com/msys2/MSYS2-keyring. The release never takes
 # the latest mark, which stays with the Herdr app.
 name: zsh
 
@@ -70,14 +70,42 @@ jobs:
           mkdir -p dist keys
           curl -fsSL -A "$UA" --retry 3 "$REPO_URL/$FILE" -o "dist/$FILE"
           curl -fsSL -A "$UA" --retry 3 "$REPO_URL/$FILE.sig" -o "dist/$FILE.sig"
-          # MSYS2 signs packages with its master keys. Only master/ is
-          # imported: revoked keys sit in master-revoked/, so a signature by
-          # one of them fails here.
+          # MSYS2 signs packages with packager keys, each certified by its
+          # master keys. msys2.gpg, from MSYS2's keyring repo, holds both, as
+          # pacman imports it. The trust does not rest on that repo alone: a
+          # signature counts only when its key is one of the master keys
+          # below, or is listed in packager-keyids and certified by one of
+          # them. The master fingerprints are the ones msys2.org/dev/keyring
+          # gives, checked on 2026-11-27.
+          masters="D55E7A6D7CE9BA1587C0ACACF40D263ECA25678A
+          B91BCF3303284BF90CC043CA9F418C233E652008
+          9DD0D4217D75A33B896159E6DA7EF2ABAEEA755C
+          6E8FEAFF9644F54EED90EEA0790AE56A1D3CFDDC
+          69985C5EB351011C78DF7F6D755B8182ACD22879"
+          masters=$(printf '%s\n' "$masters" | tr -d ' ')
           git clone -q --depth 1 https://github.com/msys2/MSYS2-keyring.git keyring
           export GNUPGHOME="$PWD/keys"
           chmod 700 keys
-          for key in keyring/master/*.asc; do gpg --batch -q --import "$key"; done
-          gpg --batch --verify "dist/$FILE.sig" "dist/$FILE"
+          gpg --batch -q --import keyring/msys2.gpg
+          status=$(gpg --batch --status-fd 1 --verify "dist/$FILE.sig" "dist/$FILE" 2>/dev/null || true)
+          # VALIDSIG's last field is the primary key, also for a subkey signature.
+          signer=$(printf '%s\n' "$status" | awk '$2 == "VALIDSIG" { print $NF }')
+          [ -n "$signer" ] || { echo "no good signature on $FILE"; printf '%s\n' "$status"; exit 1; }
+          if printf '%s\n' "$status" | grep -qE '^\[GNUPG:\] (REVKEYSIG|KEYREVOKED)'; then
+            echo "$FILE is signed by $signer, a revoked key"; exit 1
+          fi
+          if printf '%s\n' "$masters" | grep -qx "$signer"; then
+            echo "signed by $signer, an MSYS2 master key"
+          else
+            awk '{ print $1 }' keyring/packager-keyids | grep -qx "$signer" \
+              || { echo "$FILE is signed by $signer, which MSYS2 does not list as a packager key"; exit 1; }
+            # sig records with ! are certifications gpg checked as good; field 5 is the issuer's key id.
+            by=$(gpg --batch --with-colons --check-sigs "$signer" 2>/dev/null \
+              | awk -F: '$1 == "sig" && $2 == "!" { print $5 }' | sort -u \
+              | grep -xF -f <(printf '%s\n' "$masters" | cut -c25-40) || true)
+            [ -n "$by" ] || { echo "$FILE is signed by $signer, which no MSYS2 master key certifies"; exit 1; }
+            echo "signed by $signer ($(awk -v k="$signer" '$1 == k { print $2 }' keyring/packager-keyids)), certified by master keys: $(echo $by)"
+          fi
           # The package must hold zsh itself, for Git for Windows' usr/bin.
           tar --zstd -tf "dist/$FILE" | grep -qx 'usr/bin/zsh.exe' || { echo "no usr/bin/zsh.exe in $FILE"; exit 1; }
           tar --zstd -xOf "dist/$FILE" .PKGINFO | grep -E '^(pkgver|depend) ='
@@ -99,7 +127,7 @@ jobs:
             echo "For Git for Windows: unpack \`$FILE\` into the Git folder, so \`usr/bin/zsh.exe\` lands beside Git's \`bash.exe\`."
             echo "It needs libiconv, libpcre2_8 and ncurses, which Git for Windows already ships."
             echo
-            echo "\`$FILE.sig\` is MSYS2's own signature; it was checked against MSYS2's master keys before publishing."
+            echo "\`$FILE.sig\` is MSYS2's own signature; it was checked against MSYS2's packager and master keys before publishing."
           } > notes.md
           if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber -R "$GITHUB_REPOSITORY"

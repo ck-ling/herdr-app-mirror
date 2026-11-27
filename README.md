@@ -10,7 +10,7 @@ Run it by hand from the Actions tab to mirror one version now.
 ## Platforms
 
 - Windows x64: `herdr-app-windows-x86_64.zip` (app releases, `v*`) and `herdr-core-windows-x86_64.zip` (core releases, `core-v*`)
-- zsh for Git for Windows: MSYS2's `zsh-<version>-x86_64.pkg.tar.zst` and its `.sig` (releases `zsh-v*`), from the `zsh` workflow every Monday. It checks the `.sig` against MSYS2's master keys before it publishes, and never takes the latest mark.
+- zsh for Git for Windows: MSYS2's `zsh-<version>-x86_64.pkg.tar.zst` and its `.sig` (releases `zsh-v*`), from the `zsh` workflow every Monday. It checks the `.sig` against MSYS2's packager and master keys before it publishes, and never takes the latest mark.
 
 ## Install on Windows
 
